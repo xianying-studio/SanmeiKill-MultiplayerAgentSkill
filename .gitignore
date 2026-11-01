@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.sessions/
+*.profile/
+*.lock
+*.smk
+*.log
+*.png
+.DS_Store
+*.resources/

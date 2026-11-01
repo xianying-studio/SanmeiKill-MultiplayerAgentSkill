@@ -1,0 +1,36 @@
+{
+	"name": "headless-sanmei-kill-client",
+	"version": "0.1.0",
+	"private": true,
+	"description": "基于 Node.js 实现的三梅杀联机模式玩家 CLI",
+	"type": "module",
+	"bin": {
+		"headless-sanmei-kill-client": "dist/cli.js"
+	},
+	"files": [
+		"dist",
+		"skills",
+		"docs",
+		"README.md"
+	],
+	"engines": {
+		"node": ">=22.12.0"
+	},
+	"scripts": {
+		"build": "tsc && node scripts/package-skill.mjs",
+		"test": "npm run build && node --test tests/*.test.mjs",
+		"check": "tsc --noEmit",
+		"format": "prettier --write src scripts tests skills README.md package.json tsconfig.json .github"
+	},
+	"dependencies": {
+		"fake-indexeddb": "6.2.4",
+		"happy-dom": "21.0.4",
+		"ws": "8.18.3"
+	},
+	"devDependencies": {
+		"@types/node": "^22.10.0",
+		"@types/ws": "8.18.1",
+		"prettier": "^3.8.1",
+		"typescript": "^5.9.3"
+	}
+}
