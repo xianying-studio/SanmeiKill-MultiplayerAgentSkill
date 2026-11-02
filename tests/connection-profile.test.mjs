@@ -49,6 +49,18 @@ test("损坏的重连资料明确报错，不静默换成新身份", async (t) =
 	await assert.rejects(new ConnectionProfile(directory, "https://game.test/").load(), /重连资料损坏/);
 });
 
+test("并发保存 A/B/A 保留最后请求的房间与席位，不因旧落盘值相同而丢写", async (t) => {
+	const directory = await mkdtemp(join(tmpdir(), "sanmei-profile-"));
+	t.after(() => rm(directory, { recursive: true, force: true }));
+	const profile = new ConnectionProfile(directory, "https://game.test/");
+	const first = { server: "wss://server.test/", room: "100", reconnect: ["wss://server.test/", "席位甲"], storage: { noname_0_9_key: "凭据甲" } };
+	const second = { ...first, room: "200", reconnect: ["wss://server.test/", "席位乙"] };
+	await profile.save(first);
+	await Promise.all([profile.save(second), profile.save(first)]);
+	const saved = await new ConnectionProfile(directory, "https://game.test/").load();
+	for (const key of ["server", "room", "reconnect", "storage"]) assert.deepEqual(saved[key], first[key]);
+});
+
 test("重连资料写入失败只警告一次，仍能继续刷新对局", async (t) => {
 	const events = [];
 	const runtime = new NodeRuntime({}, { onEvent: (...args) => events.push(args), onDisconnect() {} });

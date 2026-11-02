@@ -6,6 +6,8 @@ export class SocketTransport extends EventEmitter {
 	bufferedAmount = 0;
 	readonly worker: Worker;
 	private ended = false;
+	private readonly exited: Promise<void>;
+	private disposal?: Promise<void>;
 	constructor(
 		public url: string,
 		protocols?: string | string[]
@@ -27,7 +29,12 @@ export class SocketTransport extends EventEmitter {
 		this.worker.on("error", () => {
 			if (!this.ended) this.emit("error", new Error("联机传输线程异常"));
 		});
-		this.worker.on("exit", () => this.finish(1006, "联机传输线程已退出"));
+		this.exited = new Promise((resolve) => {
+			this.worker.once("exit", () => {
+				this.finish(1006, "联机传输线程已退出");
+				resolve();
+			});
+		});
 	}
 	private finish(code: number, reason: string) {
 		if (this.ended) return;
@@ -48,7 +55,23 @@ export class SocketTransport extends EventEmitter {
 		this.readyState = 2;
 		this.worker.postMessage({ type: "close", code, reason });
 	}
-	async dispose() {
+	dispose() {
+		return (this.disposal ??= this.disposeWorker());
+	}
+	private async disposeWorker() {
+		if (!this.ended) this.close(1000);
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		try {
+			// Drain queued sends and the close handshake; bound cleanup for an unresponsive peer.
+			await Promise.race([
+				this.exited,
+				new Promise<void>((resolve) => {
+					timer = setTimeout(resolve, 1000);
+				}),
+			]);
+		} finally {
+			clearTimeout(timer);
+		}
 		await this.worker.terminate();
 	}
 }

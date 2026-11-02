@@ -47,11 +47,12 @@ export class ConnectionProfile {
     }
     async save(settings) {
         const text = JSON.stringify({ version: 1, site: this.site, ...settings });
-        if (text === this.previous)
-            return this.writing;
         const write = this.writing
             .catch(() => { })
             .then(async () => {
+            // Earlier queued writes may change the disk value before this request runs.
+            if (text === this.previous)
+                return;
             await mkdir(this.directory, { recursive: true, mode: 0o700 });
             const temporary = join(this.directory, `connection.${randomUUID()}.tmp`);
             await writeFile(temporary, text, { mode: 0o600 });
