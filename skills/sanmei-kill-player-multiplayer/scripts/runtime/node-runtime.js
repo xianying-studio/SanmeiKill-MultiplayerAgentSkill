@@ -1,4 +1,4 @@
-import WebSocketTransport from "ws";
+import { SocketTransport } from "./socket-transport.js";
 import { Window, PropertySymbol } from "happy-dom";
 import { indexedDB, IDBKeyRange } from "fake-indexeddb";
 import { register } from "node:module";
@@ -7,6 +7,7 @@ import { EventEmitter } from "node:events";
 import { DomLocator } from "./dom-page.js";
 import { installView } from "./view.js";
 import { readPublicDetails } from "./public-details.js";
+import { ConnectionProfile } from "./connection-profile.js";
 export function bindEventProperties(target, names) {
     for (const name of names) {
         let handler = null;
@@ -56,6 +57,10 @@ export class NodeRuntime extends EventEmitter {
     publicModule;
     chatCursor = 0;
     seenPublicLogs = new WeakSet();
+    profile;
+    connectionSettings;
+    activeServer = "";
+    profileWarning = false;
     mouse = {
         move: async (_x, _y) => {
             for (const node of this.window.document.querySelectorAll("#system div"))
@@ -129,6 +134,12 @@ export class NodeRuntime extends EventEmitter {
         const html = (await this.updater.read(site))?.toString();
         if (!html)
             throw new Error("缺少已校验启动页面");
+        if (this.options.profile) {
+            this.profile = new ConnectionProfile(this.options.profile, site);
+            this.connectionSettings = await this.profile.load();
+            for (const [key, value] of Object.entries(this.connectionSettings?.storage ?? {}))
+                window.localStorage.setItem(key, value);
+        }
         Object.defineProperty(window.navigator, "userAgent", { value: "SanmeiKillHeadless/0.1 Safari/605.1.15", configurable: true });
         await new Promise((resolve, reject) => {
             const request = indexedDB.open("noname_0.9_data", 4);
@@ -344,22 +355,18 @@ export class NodeRuntime extends EventEmitter {
                 super();
                 bindEventProperties(this, ["open", "message", "close", "error"]);
                 runtime.updater.assertReady();
-                this.transport = new WebSocketTransport(url, protocols);
+                this.transport = new SocketTransport(String(url), protocols);
                 runtime.sockets.add(this);
                 this.transport.on("open", () => this.deliver("open", new window.Event("open")));
                 this.transport.on("message", (data, binary) => {
-                    if (!binary && data.toString() === "heartbeat") {
-                        this.transport.send("heartbeat");
-                        return;
-                    }
                     this.deliver("message", new window.MessageEvent("message", { data: binary ? data : data.toString() }));
                 });
                 this.transport.on("error", () => this.deliver("error", new window.Event("error")));
                 this.transport.on("close", (code, reason) => {
                     runtime.sockets.delete(this);
                     this.deliver("close", new window.CloseEvent("close", { code, reason: reason.toString() }));
-                    if (!runtime.closed)
-                        runtime.options.onDisconnect();
+                    if (!runtime.closed && !this._nocallback)
+                        runtime.options.onDisconnect({ code, reason: reason.toString().slice(0, 200) });
                 });
             }
             get readyState() {
@@ -448,6 +455,54 @@ export class NodeRuntime extends EventEmitter {
             throw new Error("邀请对应的房间不在当前大厅，可能已关闭");
         node.dispatchEvent(new this.window.MouseEvent("click", { bubbles: true, cancelable: true }));
     }
+    async restoreConnection(server, room) {
+        this.activeServer = new URL(server).href;
+        const saved = this.connectionSettings;
+        if (!this.publicModule || !saved || !room || saved.room !== room || new URL(saved.server).href !== this.activeServer)
+            return;
+        const { lib } = await import(this.publicModule);
+        // Restore only this profile's normal reconnect settings for the explicitly requested room.
+        lib.config.reconnect_info = structuredClone(saved.reconnect);
+        // The browser compares this field to the input text, not URL equivalence (:443 and / differ).
+        lib.config.reconnect_info[0] = server;
+    }
+    async saveConnection() {
+        if (!this.profile || !this.publicModule || !this.activeServer)
+            return;
+        const { lib, game } = await import(this.publicModule);
+        const reconnect = lib.config.reconnect_info;
+        if (game.observe ||
+            !game.roomId ||
+            !Array.isArray(reconnect) ||
+            typeof reconnect[0] !== "string" ||
+            typeof reconnect[1] !== "string" ||
+            !reconnect[1] ||
+            game.onlineID !== reconnect[1])
+            return;
+        const storage = {};
+        for (let i = 0; i < this.window.localStorage.length; i++) {
+            const key = this.window.localStorage.key(i);
+            if (key?.endsWith("_key"))
+                storage[key] = this.window.localStorage.getItem(key);
+        }
+        try {
+            const savedReconnect = [reconnect[0], reconnect[1]];
+            if (typeof reconnect[2] === "string")
+                savedReconnect.push(reconnect[2]);
+            await this.profile.save({
+                server: this.activeServer,
+                room: String(game.roomId),
+                reconnect: savedReconnect,
+                storage,
+            });
+            this.profileWarning = false;
+        }
+        catch {
+            if (!this.profileWarning)
+                this.options.onEvent("warning", { message: "无法保存自己的重连资料；当前对局可继续，重启后可能无法恢复席位" });
+            this.profileWarning = true;
+        }
+    }
     async describePublic(name) {
         this.check();
         if (!this.publicModule)
@@ -523,12 +578,14 @@ export class NodeRuntime extends EventEmitter {
     async close() {
         if (this.closed)
             return;
+        await this.saveConnection().catch(() => { });
         this.closed = true;
         this.observer?.disconnect();
         for (const timer of this.timers)
             clearTimeout(timer);
         for (const socket of this.sockets)
             socket.close();
+        await Promise.all([...this.sockets].map((socket) => socket.transport.dispose()));
         await this.window?.happyDOM.close();
         this.port?.close();
         globalThis.fetch = nativeFetch;

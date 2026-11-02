@@ -28,8 +28,10 @@ export class PlayerClient {
     runtimeFailed = false;
     viewVersion = 0;
     nextDetailsAt = 0;
+    nextProfileAt = 0;
     refreshTask;
     serial = Promise.resolve();
+    refreshWarning = false;
     constructor(options) {
         this.options = options;
         options.nickname = playerNickname(options.nickname);
@@ -51,6 +53,7 @@ export class PlayerClient {
             throw new Error("客户端已停止");
         this.context = this.page = new NodeRuntime(this.updater, {
             nickname: this.options.nickname,
+            profile: this.options.profile,
             onEvent: (type, data) => {
                 if (type === "error") {
                     this.runtimeFailed = true;
@@ -58,11 +61,11 @@ export class PlayerClient {
                 }
                 this.journal.append(type, data);
             },
-            onDisconnect: () => {
+            onDisconnect: (details) => {
                 this.disconnected = true;
                 if (this.phase !== "over")
                     this.phase = "disconnected";
-                this.journal.append("disconnected", { text: "联机连接已断开，旧操作不可再提交" });
+                this.journal.append("disconnected", { text: "联机连接已断开，旧操作不可再提交", ...details });
             },
         });
         this.page.on("close", () => {
@@ -87,14 +90,18 @@ export class PlayerClient {
             await input.fill(this.server);
         }
         this.journal.append("server", { url: this.server, source: this.options.server ? "custom" : "visible-game-page" });
+        await this.page.restoreConnection(this.server, this.options.invite ? parseInvitation(this.options.invite).room : undefined);
         await this.page.getByText("连接", { exact: true }).click();
         await this.page
             .getByText("创建房间", { exact: true })
             .or(this.page.locator("#system").getByText("聊天", { exact: true }))
+            .or(this.page.locator("#system").getByText("退出旁观", { exact: true }))
             .waitFor({ timeout: 60000 });
-        this.phase = (await this.page.getByText("房间信息", { exact: true }).count()) ? "joined" : "lobby";
+        if (this.phase !== "over")
+            this.phase = "lobby";
         await this.refresh();
-        if (this.options.invite)
+        this.checkSeat();
+        if (this.options.invite && this.phase === "lobby")
             await this.joinInvitation(this.options.invite);
     }
     poll() {
@@ -103,9 +110,14 @@ export class PlayerClient {
         this.timer = setTimeout(async () => {
             try {
                 await this.refresh();
+                if (this.refreshWarning)
+                    this.journal.append("recovered", { text: "公开状态刷新已恢复，请使用当前 revision 决策" });
+                this.refreshWarning = false;
             }
             catch {
-                /* Navigation temporarily destroys the DOM context. */
+                if (!this.refreshWarning)
+                    this.journal.append("warning", { text: "公开状态刷新失败，正在重试；暂勿重放旧操作" });
+                this.refreshWarning = true;
             }
             this.poll();
         }, 200);
@@ -137,6 +149,10 @@ export class PlayerClient {
         }
         else
             result.view.details = this.view?.details ?? {};
+        if (Date.now() >= this.nextProfileAt) {
+            await this.page.saveConnection();
+            this.nextProfileAt = Date.now() + 1000;
+        }
         for (const event of await this.page.readPublicEvents())
             this.journal.append(event.type, event);
         if (result.view.connection && !this.disconnected && this.phase !== "over")
@@ -208,8 +224,7 @@ export class PlayerClient {
         if (!this.view?.rooms.some((r) => r.id === id))
             throw new Error("房间已变化，请重新读取 rooms");
         await this.page.locator(`[data-player-client-id="${id}"]`).click();
-        await this.page.locator("#system").getByText("聊天", { exact: true }).waitFor({ timeout: 15000 });
-        this.phase = "joined";
+        await this.waitForRoom();
         this.journal.append("joined", { room: id, text: "等待浏览器端房主开始游戏" });
         await this.refresh();
         return this.status();
@@ -222,11 +237,26 @@ export class PlayerClient {
         if (new URL(this.server).href !== invitation.server)
             throw new Error("邀请属于另一个服务器，请 stop 后使用 start --invite-file 启动对应会话");
         await this.page.joinPublicRoom(invitation.room);
-        await this.page.locator("#system").getByText("聊天", { exact: true }).waitFor({ timeout: 15000 });
-        this.phase = "joined";
+        await this.waitForRoom();
         this.journal.append("joined", { room: invitation.room, source: "invitation" });
         await this.refresh();
         return this.status();
+    }
+    async waitForRoom() {
+        await this.page
+            .locator("#system")
+            .getByText("聊天", { exact: true })
+            .or(this.page.locator("#system").getByText("退出旁观", { exact: true }))
+            .waitFor({ timeout: 15000 });
+        await this.refresh();
+        this.checkSeat();
+        if (this.phase !== "over")
+            this.phase = "joined";
+        await this.page.saveConnection();
+    }
+    checkSeat() {
+        if (this.view?.connection === "observing")
+            throw new Error("当前进入的是旁观席，未恢复玩家身份；请使用原 --session 和原邀请重连，不要把未知牌当成手牌");
     }
     checkRevision(revision) {
         if (revision !== this.revision)

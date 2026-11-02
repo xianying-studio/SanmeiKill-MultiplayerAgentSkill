@@ -128,6 +128,50 @@ test("无文字牌背仍有明确未知牌标签", async () => {
 	await window.happyDOM.close();
 });
 
+test("旁观界面明确标识，隐藏其手牌与操作，不误认为已恢复玩家席位", async () => {
+	const window = fixture(
+		'<div id="system"><div>退出旁观</div></div><div id="arena"><div class="player">另一名玩家</div></div><div id="handcards1"><div class="card selectable">旁观可见的牌</div></div>'
+	);
+	const view = window.sanmeiPlayerView.read();
+	assert.equal(view.connection, "observing");
+	assert.equal(view.hand.length, 0);
+	assert.equal(view.actions.length, 0);
+	window.document.querySelector("#system").innerHTML = "<div>聊天</div>";
+	assert.equal(window.sanmeiPlayerView.read().connection, "joined");
+	await window.happyDOM.close();
+});
+
+test("大手牌视图避免反复计算共同祖先样式，下一快照仍正确隐藏新隐去内容", async () => {
+	const window = fixture('<div id="handcards1">' + '<div class="card"><div>公开牌面</div></div>'.repeat(300) + "</div>");
+	const original = window.getComputedStyle.bind(window);
+	let calls = 0;
+	window.getComputedStyle = (node) => {
+		calls++;
+		return original(node);
+	};
+	const first = window.sanmeiPlayerView.read();
+	assert.equal(first.hand.length, 300);
+	assert.ok(calls < 1000, `样式查询过多：${calls}`);
+	window.document.querySelector("#handcards1").style.display = "none";
+	assert.equal(window.sanmeiPlayerView.read().hand.length, 0);
+	await window.happyDOM.close();
+});
+
+test("刷新失败有去重警告，恢复后通知而不静默停留在旧状态", async (t) => {
+	const client = new PlayerClient({ site: "https://example.test/", profile: "/tmp/unused" });
+	t.after(() => client.close());
+	let attempts = 0;
+	client.refresh = async () => {
+		if (++attempts <= 2) throw Error("临时读取失败");
+	};
+	client.poll();
+	for (let i = 0; i < 30 && !client.journal.read(0).events.some((e) => e.type === "recovered"); i++)
+		await new Promise((resolve) => setTimeout(resolve, 50));
+	const events = client.journal.read(0).events;
+	assert.equal(events.filter((e) => e.type === "warning").length, 1);
+	assert.equal(events.filter((e) => e.type === "recovered").length, 1);
+});
+
 test("资源来源默认在线、自定义网站与联机地址独立，本地包体失败不回退", async () => {
 	const { resourceSource, checkLocalPackage } = await import("../dist/resources.js");
 	assert.deepEqual(resourceSource(), { site: "https://sanmei-kill.xianying.online/", mode: "website" });

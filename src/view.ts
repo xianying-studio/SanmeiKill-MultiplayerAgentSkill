@@ -5,32 +5,47 @@ export function installView() {
 	const ids = new WeakMap<Element, string>();
 	const events: unknown[] = [];
 	const seenLogs = new WeakMap<Element, string>();
+	let visibility = new WeakMap<Element, boolean>();
+	let texts = new WeakMap<Element, string>();
+	const beginRead = () => {
+		visibility = new WeakMap();
+		texts = new WeakMap();
+	};
 	const id = (node: Element) => {
 		if (!ids.has(node)) ids.set(node, `v${nextId++}`);
 		const value = ids.get(node)!;
 		if (node.getAttribute("data-player-client-id") !== value) node.setAttribute("data-player-client-id", value);
 		return value;
 	};
-	const visible = (node: Element) => {
-		if (!node.isConnected || !node.getClientRects().length) return false;
-		for (let p: Element | null = node; p; p = p.parentElement) {
-			const style = getComputedStyle(p);
-			if (style.display === "none" || style.visibility !== "visible" || Number(style.opacity) === 0) return false;
+	const visible = (node: Element): boolean => {
+		if (visibility.has(node)) return visibility.get(node)!;
+		let value = false;
+		if (node.isConnected && node.getClientRects().length) {
+			const style = getComputedStyle(node);
+			value =
+				style.display !== "none" &&
+				style.visibility === "visible" &&
+				Number(style.opacity) !== 0 &&
+				(!node.parentElement || visible(node.parentElement));
 		}
-		return true;
+		visibility.set(node, value);
+		return value;
 	};
 	const text = (node: Element): string => {
+		if (texts.has(node)) return texts.get(node)!;
 		if (
 			node.matches("#timer, .timer, .timerbar, .infohidden") ||
 			!visible(node) ||
 			["SCRIPT", "STYLE", "TEMPLATE", "NOSCRIPT", "RT"].includes(node.tagName)
 		)
 			return "";
-		return Array.from(node.childNodes)
+		const value = Array.from(node.childNodes)
 			.map((child) => (child.nodeType === Node.TEXT_NODE ? child.textContent : child instanceof Element ? text(child) : ""))
 			.join(" ")
 			.replace(/\s+/g, " ")
 			.trim();
+		texts.set(node, value);
+		return value;
 	};
 	const nodes = (selector: string) => Array.from(document.querySelectorAll(selector)).filter(visible);
 	const describe = (node: Element) => ({
@@ -40,6 +55,10 @@ export function installView() {
 	});
 	const prohibited = /创建房间|开始游戏|启动服务器|旁观|托管|重来|再战|退出房间/;
 	const read = () => {
+		// A snapshot is synchronous: reuse ancestor styles/text only within this read.
+		beginRead();
+		const system = nodes("#system div");
+		const observing = Boolean(document.querySelector("#arena.observe")) || system.some((n) => text(n) === "退出旁观");
 		const autoButton = nodes("#system div").find((n) => text(n) === "托管");
 		const autoplay = {
 			available: Boolean(autoButton && nodes("#arena > .player").length),
@@ -67,11 +86,13 @@ export function installView() {
 				}),
 			autoplay,
 			turn: currentPlayer ? { playerId: id(currentPlayer), text: text(currentPlayer) } : null,
-			connection: nodes("#system div").some((n) => text(n) === "房间信息")
-				? "joined"
-				: nodes("#window > .connectevents").some((n) => text(n) === "创建房间")
-					? "lobby"
-					: null,
+			connection: observing
+				? "observing"
+				: system.some((n) => ["房间信息", "聊天"].includes(text(n)))
+					? "joined"
+					: nodes("#window > .connectevents").some((n) => text(n) === "创建房间")
+						? "lobby"
+						: null,
 			rooms,
 			players: nodes("#arena > .player, #arena .player.dead").map((n) => ({
 				...describe(n),
@@ -81,15 +102,19 @@ export function installView() {
 					.filter(visible)
 					.map((p) => ({ filled: !p.classList.contains("lost"), text: text(p) })),
 			})),
-			hand: nodes("#handcards1 .card, #handcards2 .card").map(describe),
+			hand: observing ? [] : nodes("#handcards1 .card, #handcards2 .card").map(describe),
 			dialogs: nodes(".dialog:not(.noupdate):not(.popped), #prompt, .prompt")
 				.map((n) => text(n))
 				.filter(Boolean),
-			actions: autoplay.enabled || animations || nodes(".menu-container:not(.hidden), .popup-container:not(.hidden)").length ? [] : actions,
+			actions:
+				observing || autoplay.enabled || animations || nodes(".menu-container:not(.hidden), .popup-container:not(.hidden)").length
+					? []
+					: actions,
 			animating: animations,
 		};
 	};
 	const capture = () => {
+		beginRead();
 		for (const node of nodes("#historybar > *, .dialog:not(.popped) .caption")) {
 			const value = text(node);
 			if (value && seenLogs.get(node) !== value) {
@@ -122,7 +147,7 @@ export interface View {
 	details?: Record<string, unknown>;
 	autoplay?: { available: boolean; enabled: boolean };
 	turn?: { playerId: string; text: string } | null;
-	connection?: "joined" | "lobby" | null;
+	connection?: "joined" | "lobby" | "observing" | null;
 	rooms: Choice[];
 	players: (Choice & { dead: boolean })[];
 	hand: Choice[];

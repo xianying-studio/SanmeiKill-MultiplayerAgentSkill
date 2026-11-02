@@ -48,6 +48,18 @@ async function request(action: string, args: unknown = {}) {
 	});
 	const result = (await response.json()) as { error?: string };
 	if (!response.ok) throw new Error(result.error ?? "客户端请求失败");
+	if (action === "stop") {
+		for (let n = 0; n < 100; n++) {
+			await delay(100);
+			try {
+				await readFile(session + ".lock");
+			} catch (error: any) {
+				if (error.code === "ENOENT") return result;
+				throw error;
+			}
+		}
+		throw new Error("停止尚未完成，请确认旧会话退出后再重启");
+	}
 	return result;
 }
 async function daemon() {
